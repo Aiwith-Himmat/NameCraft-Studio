@@ -1,20 +1,11 @@
-# NamePrint Studio — Version 2
+# NamePrint Studio 
 
 A reusable Python + Streamlit browser app for printing attendee names on card/badge designs.
 
-## What's improved in V2?
-- Angled/rotated name text (default -11° to resemble the CCD ATTENDEE lettering)
-- Uppercase names
-- Bold italic sans-serif fallback
-- Adjustable font size and automatic shrink-to-fit
-- Adjustable text position, rotation and width
-- Optional text outline and drop shadow with blur/offset controls
-- Custom TTF/OTF font upload
-- Preview, bulk PNG ZIP export, and multi-page PDF export
 
 ## Folder structure
 ```text
-NamePrint_Studio_v2/
+NamePrint_Studio/
 ├── app.py
 ├── requirements.txt
 └── README.md
