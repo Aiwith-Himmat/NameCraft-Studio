@@ -1,5 +1,6 @@
 import io
 import zipfile
+from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
@@ -7,6 +8,11 @@ import streamlit as st
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 st.set_page_config(page_title="NameCraft Studio", page_icon="🪪", layout="wide")
+
+APP_DIR = Path(__file__).parent
+FONT_DIR = APP_DIR / "fonts"
+BUNDLED_BOLD_ITALIC = FONT_DIR / "DejaVuSans-BoldOblique.ttf"
+BUNDLED_BOLD = FONT_DIR / "DejaVuSans-Bold.ttf"
 
 st.markdown("""
 <style>
@@ -26,6 +32,7 @@ st.markdown("""
 <p>Reusable card-name generator · Upload a design and names, style the text, preview, and export.</p></div>
 """, unsafe_allow_html=True)
 
+
 def load_names(file):
     if file.name.lower().endswith(".csv"):
         try:
@@ -35,28 +42,23 @@ def load_names(file):
             return pd.read_csv(file, encoding="latin-1")
     return pd.read_excel(file)
 
+
+@st.cache_resource(show_spinner=False)
 def get_font(font_bytes, size, italic=True):
+    """Load a scalable TrueType font; never silently fall back to tiny bitmap text."""
     if font_bytes:
-        try:
-            return ImageFont.truetype(io.BytesIO(font_bytes), size=size)
-        except Exception:
-            pass
-    candidates = (
-        ["DejaVuSans-BoldOblique.ttf", "LiberationSans-BoldItalic.ttf",
-         "Arial Bold Italic.ttf", "arialbi.ttf", "DejaVuSans-Bold.ttf"]
-        if italic else
-        ["DejaVuSans-Bold.ttf", "Arial.ttf", "arial.ttf"]
-    )
-    for name in candidates:
-        try:
-            return ImageFont.truetype(name, size=size)
-        except OSError:
-            continue
-    return ImageFont.load_default()
+        return ImageFont.truetype(io.BytesIO(font_bytes), size=size)
+
+    font_path = BUNDLED_BOLD_ITALIC if italic else BUNDLED_BOLD
+    if not font_path.exists():
+        raise FileNotFoundError(
+            f"Bundled font not found: {font_path}. Keep the fonts folder beside app.py."
+        )
+    return ImageFont.truetype(str(font_path), size=size)
+
 
 def make_text_layer(text, font, fill, stroke_width, stroke_fill,
                     shadow_enabled, shadow_color, shadow_blur, shadow_x, shadow_y):
-    # Render text on a transparent layer with generous room for rotation.
     probe = Image.new("RGBA", (8, 8), (0, 0, 0, 0))
     d = ImageDraw.Draw(probe)
     bbox = d.textbbox((0, 0), text, font=font, stroke_width=stroke_width)
@@ -80,6 +82,7 @@ def make_text_layer(text, font, fill, stroke_width, stroke_fill,
               stroke_fill=stroke_fill)
     return layer
 
+
 def render_card(template, raw_name, cfg, font_bytes=None):
     base = template.convert("RGBA").copy()
     text = str(raw_name).strip()
@@ -91,7 +94,6 @@ def render_card(template, raw_name, cfg, font_bytes=None):
     max_h = int(H * cfg["max_height_pct"] / 100)
     size = cfg["font_size"]
 
-    # Fit based on the unrotated text bounds, leaving room for the tilt.
     while size > cfg["min_font_size"]:
         font = get_font(font_bytes, size, cfg["italic"])
         probe = ImageDraw.Draw(Image.new("RGBA", (2, 2)))
@@ -100,22 +102,29 @@ def render_card(template, raw_name, cfg, font_bytes=None):
                 box[3] - box[1] <= max_h * 0.90):
             break
         size -= 1
-    font = get_font(font_bytes, max(size, cfg["min_font_size"]), cfg["italic"])
 
+    font = get_font(font_bytes, max(size, cfg["min_font_size"]), cfg["italic"])
     layer = make_text_layer(
         text, font, cfg["text_color"], cfg["stroke_width"], cfg["stroke_color"],
         cfg["shadow"], cfg["shadow_color"], cfg["shadow_blur"],
         cfg["shadow_x"], cfg["shadow_y"]
     )
-    # PIL positive angle is counter-clockwise: negative angle rises to the right.
     layer = layer.rotate(cfg["rotation"], resample=Image.Resampling.BICUBIC, expand=True)
-
     cx = int(W * cfg["x_pct"] / 100)
     cy = int(H * cfg["y_pct"] / 100)
     left = cx - layer.width // 2
     top = cy - layer.height // 2
     base.alpha_composite(layer, (left, top))
     return base.convert("RGB")
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def cached_preview(template_bytes, raw_name, cfg_items, font_bytes):
+    """Cache identical previews so Streamlit reruns don't redraw the same card."""
+    template = Image.open(io.BytesIO(template_bytes)).convert("RGBA")
+    cfg = dict(cfg_items)
+    return render_card(template, raw_name, cfg, font_bytes)
+
 
 st.subheader("1. Upload files")
 c1, c2 = st.columns(2)
@@ -129,7 +138,8 @@ if not template_file or not names_file:
     st.stop()
 
 try:
-    template = Image.open(template_file).convert("RGBA")
+    template_bytes = template_file.getvalue()
+    template = Image.open(io.BytesIO(template_bytes)).convert("RGBA")
     data = load_names(names_file)
 except Exception as exc:
     st.error(f"Could not read uploaded file: {exc}")
@@ -139,7 +149,6 @@ if data.empty or len(data.columns) == 0:
     st.error("The names file is empty.")
     st.stop()
 
-
 st.subheader("2. Choose names column")
 name_col = st.selectbox("Column containing names", list(data.columns))
 names = [str(x).strip() for x in data[name_col].dropna().tolist()
@@ -148,9 +157,6 @@ if not names:
     st.error("No names found in this column.")
     st.stop()
 
-font_bytes = None
-# Keep all editing controls in the left column and the live preview in the
-# right column, so the preview remains visible while the user adjusts settings.
 settings_col, preview_col = st.columns([1.08, 0.92], gap="large")
 
 with settings_col:
@@ -198,24 +204,33 @@ with preview_col:
     with st.container(key="preview_panel"):
         st.subheader("4. Live preview")
         idx = st.selectbox("Preview attendee", range(len(names)), format_func=lambda i: names[i])
-        preview = render_card(template, names[idx], cfg, font_bytes)
-        st.image(preview, caption=f"Preview: {names[idx]}", use_container_width=True)
+        try:
+            preview = cached_preview(
+                template_bytes, names[idx], tuple(cfg.items()), font_bytes
+            )
+            st.image(preview, caption=f"Preview: {names[idx]}", use_container_width=True)
+        except Exception as exc:
+            st.error(f"Could not render preview: {exc}")
+            st.stop()
         st.metric("Cards to generate", len(names))
         st.caption(f"Card size: {template.width} × {template.height} px")
         st.caption("The preview updates when you change a setting on the left.")
 
 st.divider()
 st.subheader("5. Generate all cards")
+
 if st.button("Generate attendee cards", type="primary", use_container_width=True):
     zip_data = io.BytesIO()
     generated = []
     progress = st.progress(0)
+
     with zipfile.ZipFile(zip_data, "w", zipfile.ZIP_DEFLATED) as zf:
         for i, person in enumerate(names, 1):
             card = render_card(template, person, cfg, font_bytes)
             image_data = io.BytesIO()
             card.save(image_data, format="PNG", dpi=(300, 300))
-            safe = "".join(ch if ch.isalnum() or ch in "-_ " else "_" for ch in person).strip().replace(" ", "_")
+            safe = "".join(ch if ch.isalnum() or ch in "-_ " else "_" for ch in person)
+            safe = safe.strip().replace(" ", "_")
             zf.writestr(f"{i:03d}_{safe or 'attendee'}.png", image_data.getvalue())
             generated.append(card)
             progress.progress(i / len(names))
@@ -223,8 +238,10 @@ if st.button("Generate attendee cards", type="primary", use_container_width=True
     st.success(f"Generated {len(generated)} cards.")
     st.download_button("⬇️ Download all PNG cards (ZIP)", zip_data.getvalue(),
                        "attendee_cards.zip", "application/zip", use_container_width=True)
+
     pdf = io.BytesIO()
-    generated[0].save(pdf, format="PDF", save_all=True, append_images=generated[1:], resolution=300)
+    generated[0].save(pdf, format="PDF", save_all=True,
+                      append_images=generated[1:], resolution=300)
     st.download_button("⬇️ Download multi-page PDF", pdf.getvalue(),
                        "attendee_cards.pdf", "application/pdf", use_container_width=True)
     st.image(generated[0], caption="First generated card", use_container_width=True)
@@ -232,7 +249,7 @@ if st.button("Generate attendee cards", type="primary", use_container_width=True
 with st.expander("Tips / troubleshooting"):
     st.markdown("""
 - Use a **blank template without the old ATTENDEE word**; this app adds the names but does not erase existing text.
-- The name style now supports tilt, uppercase, bold-italic fallback, outline, and shadow.
-- For the closest font match, upload the actual TTF/OTF font used in the design. If you don't have it, the app selects a heavy italic sans-serif font available on the machine.
+- The app now uses a bundled scalable TrueType font, so font size works consistently on Windows and Streamlit Cloud.
+- For a closer font match, upload your own TTF/OTF font file.
 - Always preview both a short name and the longest name before printing the full batch.
 """)
