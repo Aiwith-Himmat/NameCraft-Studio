@@ -9,31 +9,65 @@ import pandas as pd
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
-# Compatibility bridge for streamlit-drawable-canvas 0.9.3
+# ============================================================
+# COMPATIBILITY & CLOUD BRIDGE FOR STREAMLIT-DRAWABLE-CANVAS
+# ============================================================
+# On Streamlit Cloud / production deployments, relative '/media/...' URLs
+# fail inside sandboxed component iframes due to domain isolation / CORS.
+# Serializing background images to Base64 Data URIs fixes this everywhere.
+
+def _image_to_data_uri(
+    image, width=None, clamp=False, channels="RGB", output_format="PNG", image_id=""
+):
+    try:
+        if isinstance(image, str) and (
+            image.startswith("data:") or image.startswith("http://") or image.startswith("https://")
+        ):
+            return image
+
+        if hasattr(image, "save"):
+            buffered = io.BytesIO()
+            image.save(buffered, format="PNG")
+            encoded = base64.b64encode(buffered.getvalue()).decode("ascii")
+            return f"data:image/png;base64,{encoded}"
+
+        if isinstance(image, (bytes, bytearray)):
+            encoded = base64.b64encode(image).decode("ascii")
+            return f"data:image/png;base64,{encoded}"
+    except Exception:
+        pass
+
+    try:
+        import streamlit.elements.lib.image_utils as image_utils
+        from streamlit.elements.lib.layout_utils import LayoutConfig
+        return image_utils.image_to_url(
+            image,
+            layout_config=LayoutConfig(width=width),
+            clamp=clamp,
+            channels=channels,
+            output_format=output_format,
+            image_id=image_id,
+        )
+    except Exception:
+        return ""
+
 try:
     import streamlit.elements.image as st_image
+    st_image.image_to_url = _image_to_data_uri
+except Exception:
+    pass
+
+try:
     import streamlit.elements.lib.image_utils as image_utils
-    from streamlit.elements.lib.layout_utils import LayoutConfig
-
-    if not hasattr(st_image, "image_to_url"):
-        def _legacy_image_to_url(
-            image, width, clamp, channels, output_format, image_id
-        ):
-            return image_utils.image_to_url(
-                image,
-                layout_config=LayoutConfig(width=width),
-                clamp=clamp,
-                channels=channels,
-                output_format=output_format,
-                image_id=image_id,
-            )
-
-        st_image.image_to_url = _legacy_image_to_url
-
-except (ImportError, AttributeError, TypeError):
+    image_utils.image_to_url = _image_to_data_uri
+except Exception:
     pass
 
 from streamlit_drawable_canvas import st_canvas
+import streamlit_drawable_canvas as _sdc_mod
+if hasattr(_sdc_mod, "image_to_url"):
+    _sdc_mod.image_to_url = _image_to_data_uri
+
 
 
 # ============================================================
