@@ -9,65 +9,27 @@ import pandas as pd
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
-# ============================================================
-# COMPATIBILITY & CLOUD BRIDGE FOR STREAMLIT-DRAWABLE-CANVAS
-# ============================================================
-# On Streamlit Cloud / production deployments, relative '/media/...' URLs
-# fail inside sandboxed component iframes due to domain isolation / CORS.
-# Serializing background images to Base64 Data URIs fixes this everywhere.
-
-def _image_to_data_uri(
-    image, width=None, clamp=False, channels="RGB", output_format="PNG", image_id=""
-):
-    try:
-        if isinstance(image, str) and (
-            image.startswith("data:") or image.startswith("http://") or image.startswith("https://")
-        ):
-            return image
-
-        if hasattr(image, "save"):
-            buffered = io.BytesIO()
-            image.save(buffered, format="PNG")
-            encoded = base64.b64encode(buffered.getvalue()).decode("ascii")
-            return f"data:image/png;base64,{encoded}"
-
-        if isinstance(image, (bytes, bytearray)):
-            encoded = base64.b64encode(image).decode("ascii")
-            return f"data:image/png;base64,{encoded}"
-    except Exception:
-        pass
-
-    try:
-        import streamlit.elements.lib.image_utils as image_utils
-        from streamlit.elements.lib.layout_utils import LayoutConfig
-        return image_utils.image_to_url(
-            image,
-            layout_config=LayoutConfig(width=width),
-            clamp=clamp,
-            channels=channels,
-            output_format=output_format,
-            image_id=image_id,
-        )
-    except Exception:
-        return ""
-
+# Compatibility bridge for streamlit-drawable-canvas
 try:
     import streamlit.elements.image as st_image
-    st_image.image_to_url = _image_to_data_uri
-except Exception:
-    pass
-
-try:
     import streamlit.elements.lib.image_utils as image_utils
-    image_utils.image_to_url = _image_to_data_uri
+    from streamlit.elements.lib.layout_utils import LayoutConfig
+
+    if not hasattr(st_image, "image_to_url"):
+        def _legacy_image_to_url(image, width=None, clamp=False, channels="RGB", output_format="PNG", image_id=""):
+            return image_utils.image_to_url(
+                image,
+                layout_config=LayoutConfig(width=width),
+                clamp=clamp,
+                channels=channels,
+                output_format=output_format,
+                image_id=image_id,
+            )
+        st_image.image_to_url = _legacy_image_to_url
 except Exception:
     pass
 
 from streamlit_drawable_canvas import st_canvas
-import streamlit_drawable_canvas as _sdc_mod
-if hasattr(_sdc_mod, "image_to_url"):
-    _sdc_mod.image_to_url = _image_to_data_uri
-
 
 
 # ============================================================
@@ -125,7 +87,7 @@ div[data-testid="stCanvas"] {
     border: 2px solid #00C853;
     border-radius: 12px;
     padding: 6px;
-    background: #f7faf8;
+    background: #111111;
 }
 div[data-testid="stCanvas"] canvas {
     touch-action: none;
@@ -369,7 +331,7 @@ def layer_to_data_url(layer):
 
 
 # ============================================================
-# CANVAS IMAGE OBJECT (DIRECT EDITING - ALWAYS ENABLED)
+# CANVAS DRAWING BUILDER (DIRECT EDITING & ROBUST EMBEDDED BG)
 # ============================================================
 
 def make_canvas_drawing(
@@ -380,8 +342,45 @@ def make_canvas_drawing(
     cfg,
     font_bytes,
     template_size,
-    transform
+    transform,
+    canvas_bg
 ):
+    # 1. Background card template image (locked, non-selectable)
+    # Embedding the background template as Object 0 guarantees it renders
+    # 100% reliably on both Localhost AND Streamlit Cloud without CORS / /media/ path 404 bugs!
+    bg_data_url = layer_to_data_url(canvas_bg)
+    bg_obj = {
+        "type": "image",
+        "version": "4.4.0",
+        "originX": "left",
+        "originY": "top",
+        "left": 0,
+        "top": 0,
+        "width": canvas_w,
+        "height": canvas_h,
+        "fill": "rgb(0,0,0)",
+        "stroke": None,
+        "strokeWidth": 0,
+        "src": bg_data_url,
+        "crossOrigin": "anonymous",
+        "scaleX": 1,
+        "scaleY": 1,
+        "angle": 0,
+        "opacity": 1,
+        "visible": True,
+        "selectable": False,
+        "evented": False,
+        "hasControls": False,
+        "hasBorders": False,
+        "lockMovementX": True,
+        "lockMovementY": True,
+        "lockScalingX": True,
+        "lockScalingY": True,
+        "lockRotation": True,
+        "hoverCursor": "default",
+    }
+
+    # 2. Attendee name artwork (selectable, movable, rotatable)
     layer, fitted_size = make_rendered_name_layer(
         raw_name,
         cfg,
@@ -399,55 +398,55 @@ def make_canvas_drawing(
     scale_y = float(transform.get("scale_y", 1.0))
     angle = float(transform.get("rotation", 0.0))
 
+    name_obj = {
+        "type": "image",
+        "version": "4.4.0",
+        "originX": "center",
+        "originY": "center",
+        "left": left,
+        "top": top,
+        "width": editor_w,
+        "height": editor_h,
+        "fill": "rgb(0,0,0)",
+        "stroke": None,
+        "strokeWidth": 0,
+        "src": layer_to_data_url(editor_layer),
+        "crossOrigin": "anonymous",
+        "scaleX": scale_x,
+        "scaleY": scale_y,
+        "angle": angle,
+        "opacity": 1,
+        "visible": True,
+        # Direct manipulation: always enabled
+        "selectable": True,
+        "evented": True,
+        "hasControls": True,
+        "hasBorders": True,
+        "hasRotatingPoint": True,
+        "rotatingPointOffset": 55,
+        "borderColor": "#00E676",
+        "borderOpacityWhenMoving": 1,
+        "borderScaleFactor": 4,
+        "cornerStyle": "circle",
+        "cornerSize": 22,
+        "cornerColor": "#FFFFFF",
+        "cornerStrokeColor": "#00C853",
+        "transparentCorners": False,
+        "padding": 12,
+        "lockMovementX": False,
+        "lockMovementY": False,
+        "lockScalingX": False,
+        "lockScalingY": False,
+        "lockRotation": False,
+        "lockUniScaling": True,
+        "lockSkewingX": True,
+        "lockSkewingY": True,
+        "lockScalingFlip": True,
+    }
+
     drawing = {
         "version": "4.4.0",
-        "objects": [
-            {
-                "type": "image",
-                "version": "4.4.0",
-                "originX": "center",
-                "originY": "center",
-                "left": left,
-                "top": top,
-                "width": editor_w,
-                "height": editor_h,
-                "fill": "rgb(0,0,0)",
-                "stroke": None,
-                "strokeWidth": 0,
-                "src": layer_to_data_url(editor_layer),
-                "crossOrigin": "anonymous",
-                "scaleX": scale_x,
-                "scaleY": scale_y,
-                "angle": angle,
-                "opacity": 1,
-                "visible": True,
-                # Direct manipulation: always enabled
-                "selectable": True,
-                "evented": True,
-                "hasControls": True,
-                "hasBorders": True,
-                "hasRotatingPoint": True,
-                "rotatingPointOffset": 55,
-                "borderColor": "#00E676",
-                "borderOpacityWhenMoving": 1,
-                "borderScaleFactor": 4,
-                "cornerStyle": "circle",
-                "cornerSize": 22,
-                "cornerColor": "#FFFFFF",
-                "cornerStrokeColor": "#00C853",
-                "transparentCorners": False,
-                "padding": 12,
-                "lockMovementX": False,
-                "lockMovementY": False,
-                "lockScalingX": False,
-                "lockScalingY": False,
-                "lockRotation": False,
-                "lockUniScaling": True,
-                "lockSkewingX": True,
-                "lockSkewingY": True,
-                "lockScalingFlip": True,
-            }
-        ]
+        "objects": [bg_obj, name_obj]
     }
     return drawing, fitted_size
 
@@ -455,6 +454,15 @@ def make_canvas_drawing(
 # ============================================================
 # READ CANVAS TRANSFORM (COORDINATE CONVERSION)
 # ============================================================
+
+def get_name_object(objects):
+    if not objects:
+        return None
+    for obj in objects:
+        if obj.get("selectable") is True:
+            return obj
+    return objects[-1]
+
 
 def extract_transform(obj, canvas_w, canvas_h):
     if not obj:
@@ -527,7 +535,8 @@ def read_canvas_transform(canvas_data, canvas_w, canvas_h, fallback_size=None):
                 "rotation": 0.0
             }
 
-        return extract_transform(objects[0], canvas_w, canvas_h)
+        target_obj = get_name_object(objects)
+        return extract_transform(target_obj, canvas_w, canvas_h)
     except Exception:
         return {
             "x_pct": 54.0,
@@ -827,7 +836,7 @@ if (
     st.session_state["_applied_cfg"] = None
     st.session_state["_applied_name"] = None
 
-# Construct fresh artwork drawing with current transform
+# Construct fresh artwork drawing with current transform and embedded background
 canvas_drawing, fitted_font_size = make_canvas_drawing(
     active_name,
     canvas_w,
@@ -836,12 +845,13 @@ canvas_drawing, fitted_font_size = make_canvas_drawing(
     style,
     font_bytes,
     template.size,
-    st.session_state["_transform"]
+    st.session_state["_transform"],
+    canvas_bg
 )
 
 
 # ============================================================
-# 4. LIVE EDITOR (DIRECT MANIPULATION VIA FORM - NO BLINKING)
+# 4. LIVE EDITOR (DIRECT EDITING VIA FORM - 100% CLOUD & LOCAL COMPATIBLE)
 # ============================================================
 
 with right_col:
@@ -868,8 +878,6 @@ with right_col:
     </div>
     """, unsafe_allow_html=True)
 
-    # Wrapped in st.form: prevents premature reruns while moving/resizing/rotating!
-    # Eliminates all text blinking, flickering, and disappearing.
     with st.form("namecraft_editor_form", clear_on_submit=False):
         canvas_key = (
             f"namecraft_canvas_"
@@ -878,11 +886,14 @@ with right_col:
             f"{style_signature}"
         )
 
+        # Background is directly embedded inside canvas_drawing as a locked base layer!
+        # This completely removes dependency on Streamlit's /media/ URL routing,
+        # guaranteeing that the template card renders perfectly on Localhost AND Streamlit Cloud!
         canvas_result = st_canvas(
             fill_color="rgba(0,0,0,0)",
             stroke_width=0,
             stroke_color="rgba(0,0,0,0)",
-            background_image=canvas_bg,
+            background_color="#111111",
             update_streamlit=True,
             height=canvas_h,
             width=canvas_w,
@@ -902,9 +913,10 @@ with right_col:
     if apply_clicked:
         if canvas_result is not None and canvas_result.json_data:
             returned_objects = canvas_result.json_data.get("objects") or []
-            if returned_objects:
+            target_obj = get_name_object(returned_objects)
+            if target_obj:
                 st.session_state["_transform"] = extract_transform(
-                    returned_objects[0],
+                    target_obj,
                     canvas_w,
                     canvas_h
                 )
